@@ -49,6 +49,8 @@ def descargar_playlist():
     log(f"📃 Playlist detectada con {total} videos\n")
 
     # Descargar uno por uno
+    fallidas = []
+
     for i, entry in enumerate(entries, start=1):
         try:
             video_url = entry.get("webpage_url") or entry.get("url")
@@ -58,62 +60,77 @@ def descargar_playlist():
             log(f"🎧 [{i}/{total}] Descargando: {title}...")
         except Exception as e:
             errores += 1
+            fallidas.append(title)
             log(f"❌ [{i}/{total}] Error al obtener información del video: {e}")
             continue
 
-        if not video_url:
+        mp3_path_check = os.path.join(carpeta, f"{title}.mp3")
+        if os.path.exists(mp3_path_check):
+            if os.path.getsize(mp3_path_check) > 500 * 1024:  # mínimo 500KB
+                log(f"⏩ [{i}/{total}] Ya existe: {title}, se omite.")
+                continue  # no descargar
+            else:
+                log(f"⚠️ [{i}/{total}] Archivo {title}.mp3 dañado o incompleto, se volverá a intentar.")
+
+        def intentar_descarga():
+            try:
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'outtmpl': os.path.join(carpeta, '%(title)s.%(ext)s'),
+                    'nocache': True,
+                    'cachedir': False,
+                    'ignoreerrors': True,
+                    'quiet': True,
+                    'writethumbnail': True,
+                    'postprocessors': [
+                        {
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        },
+                        {
+                            'key': 'FFmpegMetadata',
+                        },
+                    ],
+                    'ffmpeg_location': r"C:\ffmpeg\bin\ffmpeg.exe"
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    result = ydl.extract_info(video_url, download=True)
+                    if result is None:
+                        raise Exception("No se pudo extraer información del video.")
+                    filename = ydl.prepare_filename(result)
+                    mp3_path = os.path.splitext(filename)[0] + ".mp3"
+                    webp_path = os.path.splitext(filename)[0] + ".webp"
+
+                    if os.path.exists(webp_path) and os.path.exists(mp3_path):
+                        audiofile = eyed3.load(mp3_path)
+                        if audiofile.tag is None:
+                            audiofile.initTag()
+                        with open(webp_path, "rb") as img:
+                            audiofile.tag.images.set(3, img.read(), "image/webp", u"Portada")
+                            audiofile.tag.save()
+                        os.remove(webp_path)
+                        log(f"✔️ [{i}/{total}] {os.path.basename(mp3_path)} (✅ Miniatura incluida)")
+                        return True
+                    else:
+                        raise Exception("Miniatura o MP3 no encontrados.")
+            except Exception as e:
+                log(f"⚠️ [{i}/{total}] Error: {e}")
+                return False
+
+        # Intento 1
+        exito = intentar_descarga()
+        if not exito:
+            log(f"🔁 [{i}/{total}] Reintentando {title}...")
+            exito = intentar_descarga()
+
+        if exito:
+            descargados += 1
+        else:
             errores += 1
-            log(f"❌ [{i}/{total}] Error: URL no disponible para este video.")
-            continue
-
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': os.path.join(carpeta, '%(title)s.%(ext)s'),
-            'nocache': True,
-            'cachedir': False,
-            'ignoreerrors': True,
-            'quiet': True,
-            'writethumbnail': True,
-            'postprocessors': [
-                {
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                },
-                {
-                    'key': 'FFmpegMetadata',
-                },
-            ],
-            'ffmpeg_location': r"C:\ffmpeg\bin\ffmpeg.exe"
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result = ydl.extract_info(video_url, download=True)
-                if result is None:
-                    raise Exception("No se pudo extraer información del video.")
-
-                filename = ydl.prepare_filename(result)
-                mp3_path = os.path.splitext(filename)[0] + ".mp3"
-                webp_path = os.path.splitext(filename)[0] + ".webp"
-
-                if os.path.exists(webp_path) and os.path.exists(mp3_path):
-                    audiofile = eyed3.load(mp3_path)
-                    if audiofile.tag is None:
-                        audiofile.initTag()
-                    with open(webp_path, "rb") as img:
-                        audiofile.tag.images.set(3, img.read(), "image/webp", u"Portada")
-                        audiofile.tag.save()
-                    os.remove(webp_path)
-                    descargados += 1
-                    log(f"✔️ [{i}/{total}] {os.path.basename(mp3_path)} (✅ Miniatura incluida)")
-                else:
-                    errores += 1
-                    log(f"⚠️ [{i}/{total}] {title}: Miniatura o archivo mp3 no encontrados")
-
-        except Exception as e:
-            errores += 1
-            log(f"❌ [{i}/{total}] Error: {e}")
+            fallidas.append(title)
+            log(f"❌ [{i}/{total}] Falló tras reintento: {title}")
 
     # Limpiar miniatura de la playlist (jpg)
     for img in glob(os.path.join(carpeta, "*.jpg")):
@@ -122,6 +139,11 @@ def descargar_playlist():
             log(f"🗑️ Miniatura de playlist eliminada: {os.path.basename(img)}")
         except Exception as e:
             log(f"⚠️ No se pudo eliminar {img}: {e}")
+
+    if fallidas:
+        log("\n📛 Canciones que no se pudieron descargar:")
+        for fallo in fallidas:
+            log(f"   - {fallo}")
 
     # Final
     log("\n🎉 Proceso finalizado")
@@ -149,5 +171,8 @@ tk.Button(root, text="⬇️ Descargar Playlist", command=descargar_playlist, bg
 
 text_output = scrolledtext.ScrolledText(root, height=20)
 text_output.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+footer = tk.Label(root, text="Versión 1.0.0 - Desarrollado por Rasel Ricee", anchor="e", fg="gray")
+footer.pack(fill=tk.X, padx=10, pady=(0, 5))
 
 root.mainloop()
